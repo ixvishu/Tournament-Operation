@@ -1,0 +1,6 @@
+{
+  "name": "NEXUS Tactical Stadium Command",
+  "description": "Predictive Operational Intelligence AI Core and Real-Time Dashboard for managing crowd logistics, incident response, and telemetry flow during FIFA World Cup 2026.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
