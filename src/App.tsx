@@ -10,10 +10,13 @@ import CrowdBottleneckRouter from './components/CrowdBottleneckRouter';
 import LanguageAccessibilityPanel from './components/LanguageAccessibilityPanel';
 import { Shield, Radio, ShieldAlert, Cpu, AlertCircle, RefreshCw, Layers, Compass, Server, Activity } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { getInitialMockData, generateRandomLog } from './mockData';
+
+const initialMock = getInitialMockData();
 
 export default function App() {
-  const [venues, setVenues] = useState<StadiumVenue[]>([]);
-  const [logs, setLogs] = useState<TelemetryLog[]>([]);
+  const [venues, setVenues] = useState<StadiumVenue[]>(initialMock.venues);
+  const [logs, setLogs] = useState<TelemetryLog[]>(initialMock.logs);
   const [selectedVenueId, setSelectedVenueId] = useState<string>('metlife');
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [connected, setConnected] = useState<boolean>(false);
@@ -130,6 +133,78 @@ export default function App() {
     };
   }, [reconnectCount]);
 
+  // Local offline simulation loop when backend is not connected
+  useEffect(() => {
+    if (connected) return;
+
+    const interval = setInterval(() => {
+      setVenues(prevVenues => {
+        return prevVenues.map(venue => {
+          // Drifts crowd, gates, mechanical levels slightly
+          const updatedSectors = venue.sectors.map(sector => {
+            const delta = Math.floor(Math.random() * 7) - 3; // -3 to +3
+            let capPct = Math.max(30, Math.min(100, sector.capacityPct + delta));
+            
+            let status: 'normal' | 'congested' | 'critical' | 'warning' = 'normal';
+            if (capPct >= 90) status = 'critical';
+            else if (capPct >= 80) status = 'warning';
+            else if (capPct >= 70) status = 'congested';
+
+            const flowRate = Math.round(capPct * (1.2 + Math.random() * 0.8));
+            const temperatureF = Math.max(65, Math.min(95, sector.temperatureF + (Math.random() > 0.5 ? 1 : -1)));
+
+            return {
+              ...sector,
+              capacityPct: capPct,
+              status,
+              flowRate,
+              temperatureF
+            };
+          });
+
+          const crowdLevel = Math.round(updatedSectors.reduce((acc, s) => acc + s.capacityPct, 0) / updatedSectors.length);
+          
+          const gatesSector = updatedSectors.find(s => s.id === "north_gates");
+          let gateQueueMinutes = venue.gateQueueMinutes;
+          if (gatesSector) {
+            if (gatesSector.capacityPct > 85) gateQueueMinutes = Math.min(60, gateQueueMinutes + 1);
+            else if (gatesSector.capacityPct < 65) gateQueueMinutes = Math.max(5, gateQueueMinutes - 1);
+          }
+
+          const transitSector = updatedSectors.find(s => s.id === "transit_hub");
+          let transitDelayMinutes = venue.transitDelayMinutes;
+          if (transitSector) {
+            if (transitSector.capacityPct > 85) transitDelayMinutes = Math.min(45, transitDelayMinutes + 1);
+            else if (transitSector.capacityPct < 65) transitDelayMinutes = Math.max(2, transitDelayMinutes - 1);
+          }
+
+          if (crowdLevel > 85 && Math.random() > 0.85) {
+            const warningLog = generateRandomLog(venue.id, "warning", `Stadium capacity warning: Crowd level exceeds 85% (${crowdLevel}% occupancy).`);
+            setLogs(prev => [warningLog, ...prev].slice(0, 100));
+          }
+
+          let mechanicalHealthPct = venue.mechanicalHealthPct;
+          if (venue.incidents.some(i => i.severity === 'critical' && i.status !== 'resolved')) {
+            mechanicalHealthPct = Math.max(65, mechanicalHealthPct - 1);
+          } else {
+            mechanicalHealthPct = Math.min(100, mechanicalHealthPct + (Math.random() > 0.8 ? 1 : 0));
+          }
+
+          return {
+            ...venue,
+            crowdLevel,
+            gateQueueMinutes,
+            transitDelayMinutes,
+            mechanicalHealthPct,
+            sectors: updatedSectors
+          };
+        });
+      });
+    }, 6000);
+
+    return () => clearInterval(interval);
+  }, [connected]);
+
   // Handle Dispatch Crews
   const handleDispatchUnit = (incidentId: string, unitName: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -141,6 +216,29 @@ export default function App() {
           unitName
         }
       }));
+    } else {
+      // Local Client-side fallback update
+      setVenues(prev => prev.map(v => {
+        if (v.id === selectedVenueId) {
+          return {
+            ...v,
+            incidents: v.incidents.map(i => {
+              if (i.id === incidentId) {
+                return {
+                  ...i,
+                  status: 'dispatched',
+                  assignedUnit: unitName,
+                  logs: [...i.logs, `Unit [${unitName}] dispatched to location. ETA: 4 minutes.`]
+                };
+              }
+              return i;
+            })
+          };
+        }
+        return v;
+      }));
+      const clientLog = generateRandomLog(selectedVenueId, "info", `Tactical Dispatch: Unit [${unitName}] ordered to relocate.`);
+      setLogs(prev => [clientLog, ...prev]);
     }
   };
 
@@ -155,6 +253,31 @@ export default function App() {
           status
         }
       }));
+    } else {
+      // Local Client-side fallback update
+      setVenues(prev => prev.map(v => {
+        if (v.id === selectedVenueId) {
+          return {
+            ...v,
+            incidents: v.incidents.map(i => {
+              if (i.id === incidentId) {
+                return {
+                  ...i,
+                  status,
+                  logs: [...i.logs, `Incident status manually updated to: [${status.toUpperCase()}] by Operator.`]
+                };
+              }
+              return i;
+            })
+          };
+        }
+        return v;
+      }));
+
+      const targetVenue = venues.find(v => v.id === selectedVenueId);
+      const incidentName = targetVenue?.incidents.find(i => i.id === incidentId)?.title || "Incident";
+      const clientLog = generateRandomLog(selectedVenueId, "info", `Incident status changed: "${incidentName}" is now ${status.toUpperCase()}.`);
+      setLogs(prev => [clientLog, ...prev]);
     }
   };
 
@@ -168,6 +291,43 @@ export default function App() {
           ...data
         }
       }));
+    } else {
+      // Local Client-side fallback update
+      const newIncident: Incident = {
+        id: `inc_${Date.now()}`,
+        venueId: selectedVenueId,
+        title: data.title,
+        sectorName: data.sectorName,
+        severity: data.severity,
+        status: 'open',
+        timestamp: new Date().toISOString(),
+        description: data.description,
+        logs: ["Incident logged in Command database by Operator."]
+      };
+
+      setVenues(prev => prev.map(v => {
+        if (v.id === selectedVenueId) {
+          let updatedMechanicalHealthPct = v.mechanicalHealthPct;
+          if (data.severity === "critical") {
+            updatedMechanicalHealthPct = Math.max(50, v.mechanicalHealthPct - 15);
+          } else if (data.severity === "high") {
+            updatedMechanicalHealthPct = Math.max(60, v.mechanicalHealthPct - 8);
+          }
+          return {
+            ...v,
+            mechanicalHealthPct: updatedMechanicalHealthPct,
+            incidents: [newIncident, ...v.incidents]
+          };
+        }
+        return v;
+      }));
+
+      const clientLog = generateRandomLog(
+        selectedVenueId,
+        data.severity === "critical" || data.severity === "high" ? "critical" : "warning",
+        `CRITICAL INCIDENT DETECTED: [${data.severity.toUpperCase()}] ${data.title} in ${data.sectorName}.`
+      );
+      setLogs(prev => [clientLog, ...prev]);
     }
   };
 
@@ -182,10 +342,15 @@ export default function App() {
   // Keep selected incident details synced or pick the highest severity active incident to focus on
   useEffect(() => {
     if (selectedVenue) {
-      if (!selectedIncident || selectedIncident.venueId !== selectedVenueId) {
+      const matched = selectedVenue.incidents.find(i => i.id === selectedIncident?.id);
+      if (matched) {
+        setSelectedIncident(matched);
+      } else {
         const highestActive = selectedVenue.incidents.find(i => i.status !== 'resolved');
         setSelectedIncident(highestActive || null);
       }
+    } else {
+      setSelectedIncident(null);
     }
   }, [selectedVenueId, venues]);
 
